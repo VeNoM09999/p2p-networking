@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 http-body-util = "0.1.3"
 hyper = { version = "1.7.0", features = ["http1"] }
 hyper-util = { version = "0.1.17", features = ["full"] }
