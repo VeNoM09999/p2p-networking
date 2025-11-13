@@ -1,0 +1,17 @@
+[package]
+name = "p2p-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[[bin]]
+name = "client"
+path = "peer/main.rs"
+
+[[bin]]
+name = "server"
+path = "relay/main.rs"
+[workspace]
+# members = ["common", "peer", "rendezvous", "relay"]
+members = ["peer", "relay"]
