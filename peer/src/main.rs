@@ -1,4 +1,6 @@
 #![allow(dead_code, unused)]
+use std::str::FromStr;
+
 use anyhow::Result;
 use clap::Parser;
 use eventsource_stream::{Event, Eventsource};
@@ -13,23 +15,24 @@ enum Mode {
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(short, long)]
-    url: String,
     #[arg(long, value_enum)]
     mode: Mode,
+    #[arg(long)]
+    code: uuid::Uuid,
 }
 
 #[Runtime::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let udp_socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     match args.mode {
         Mode::Host => {
             println!("App started as host mode");
-            listen_to_relay(&args.url).await;
+            listen_to_relay(udp_socket).await;
         }
         Mode::Peer => {
             println!("App started as peer mode");
-            request_host_addr(&args.url).await;
+            request_host_addr(udp_socket, args.code).await;
         }
     }
     Ok(())
@@ -43,30 +46,38 @@ trait FromResponse<T> {
 }
 
 use futures_util::StreamExt;
-async fn listen_to_relay(url: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get(url)
-        .header("Accept", "text/event-stream")
-        .send()
-        .await?;
-
-    println!("Connected to relay, waiting for peers...");
-
-    let mut stream = response.bytes_stream().eventsource();
-
-    while let Some(event) = stream.next().await {
-        println!("{:?}", event);
+async fn listen_to_relay(socket: std::net::UdpSocket) -> Result<()> {
+    let data = [0];
+    socket.send_to(
+        &data,
+        std::net::SocketAddr::from_str("127.0.0.1:9903").unwrap(),
+    );
+    let mut buf = [0u8; 120];
+    if let Ok((bytes_read, addr)) = socket.recv_from(&mut buf) {
+        let addr =
+            uuid::Uuid::from_slice(&buf[..bytes_read]).expect("Failed to parse uuid from socket");
+        println!("Share Code: {}", addr);
     }
-
     Ok(())
 }
 
-async fn request_host_addr(url: &str) -> Result<()> {
-    let response = reqwest::Client::new().get(url).send().await;
-    if let Ok(r) = response {
-        println!("{}", r.text().await.unwrap());
-        // dbg!(r);
-    };
+async fn request_host_addr(socket: std::net::UdpSocket, code: uuid::Uuid) -> Result<()> {
+    let mut data = Vec::with_capacity(1 + 16);
+    data.push(1);
+
+    data.extend_from_slice(code.as_bytes());
+
+    socket.send_to(
+        &data,
+        std::net::SocketAddr::from_str("127.0.0.1:9903")
+            .expect("failed to parse socker addr from str"),
+    );
+
+    let mut buf = [0u8; 120];
+    if let Ok((bytes_read, addr)) = socket.recv_from(&mut buf) {
+        let s = str::from_utf8(&buf[..bytes_read])?;
+        let socket_addr: std::net::SocketAddr = s.parse()?;
+        println!("Host Address: {}", socket_addr);
+    }
     Ok(())
 }
