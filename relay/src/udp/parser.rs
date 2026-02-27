@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use relay::{MessageType, RelayManager};
+use std::hash::{self, Hash, Hasher};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc::Sender, oneshot};
+use tracing::{Level, error, event, info_span};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum RelayEvent {
@@ -21,21 +23,35 @@ const LOBBY_CREATE: u8 = 0;
 const LOBBY_JOIN: u8 = 1;
 
 pub async fn udp_handler(socket: Arc<UdpSocket>, channel: Arc<Sender<MessageType>>) {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 65535]; // Buffer 65,535 Bytes
+    let mut hasher = hash::DefaultHasher::new();
+
     loop {
-        if let Ok((_bytes_read, relay_observed_addr)) = socket.recv_from(&mut buf).await {
+        if let Ok((bytes_read, relay_observed_addr)) = socket.recv_from(&mut buf).await {
             if buf[0] == LOBBY_CREATE {
+                // Generating Unique Hash
+                relay_observed_addr.hash(&mut hasher);
+                hasher.write(&buf[..bytes_read]);
+                let hash = hasher.finish();
+                let _ = info_span!("LOBBY CREATE", hash).enter();
+
                 // Lobby Create
                 let code = uuid::Uuid::new_v4();
                 let (tx, rx) = oneshot::channel();
                 let _ = channel
                     .send(MessageType::CreateLobby(code, relay_observed_addr, tx))
                     .await;
-                if let Err(e) = socket.send_to(code.as_bytes(), relay_observed_addr).await {
+                if let Err(_e) = socket.send_to(code.as_bytes(), relay_observed_addr).await {
                     // Trace Error
+                    error!("Transmission failed")
                 }
                 RelayManager::keep_alive(relay_observed_addr, socket.clone(), rx).await;
             } else if buf[0] == LOBBY_JOIN {
+                // Generating Unique Hash
+                relay_observed_addr.hash(&mut hasher);
+                hasher.write(&buf[..bytes_read]);
+                let hash = hasher.finish();
+                let _ = info_span!("LOBBY JOIN", hash).enter();
                 // Lobby Join
                 match uuid::Uuid::from_slice(&buf[1..17]) {
                     Ok(code) => {
@@ -53,10 +69,11 @@ pub async fn udp_handler(socket: Arc<UdpSocket>, channel: Arc<Sender<MessageType
                             tokio::spawn(async move {
                                 let mut sent = 0;
                                 loop {
-                                    if let Err(e) =
+                                    if let Err(_e) =
                                         cloned_socket.send_to(&[0], relay_observed_addr).await
                                     {
                                         // Tracing Error
+                                        error!("Tranmission Error")
                                     }
                                     sent += 1;
                                     if sent >= 5 {
@@ -64,16 +81,18 @@ pub async fn udp_handler(socket: Arc<UdpSocket>, channel: Arc<Sender<MessageType
                                     }
                                 }
 
-                                if let Err(e) = cloned_socket
+                                if let Err(_e) = cloned_socket
                                     .send_to(host_info.to_string().as_bytes(), relay_observed_addr)
                                     .await
                                 {
                                     // Trace Error
+                                    error!("Tranmission Error: Relay -> Client")
                                 } // Relay -> Client [Host Addr]
-                                if let Err(e) = cloned_socket
+                                if let Err(_e) = cloned_socket
                                     .send_to(relay_observed_addr.to_string().as_bytes(), host_info)
                                     .await
                                 {
+                                    error!("Tranmission Error: Relay -> Host")
                                     // Trace Error
                                 } // Relay -> Host [Client Addr]
                             });
@@ -85,7 +104,11 @@ pub async fn udp_handler(socket: Arc<UdpSocket>, channel: Arc<Sender<MessageType
                 }
             } else {
                 // Echo - Drop
-                println!("Echo Packet from addr:  {}", relay_observed_addr);
+                event!(
+                    Level::INFO,
+                    "Echo Packet received from addr: {}",
+                    relay_observed_addr
+                );
             }
         }
     }

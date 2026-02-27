@@ -3,6 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::net::UdpSocket;
 use tokio::{sync::oneshot, time};
+use tracing::{Event, Level, event, info_span, trace_span};
 
 type Code = uuid::Uuid;
 type HostAddr = SocketAddr;
@@ -27,11 +28,10 @@ pub struct RelayManager {
 impl RelayManager {
     pub async fn handler(&mut self, mut rx: tokio::sync::mpsc::Receiver<MessageType>) {
         loop {
-            println!("Waiting for event");
             if let Some(event) = rx.recv().await {
-                println!("Received Event: {:?}", event);
                 match event {
                     MessageType::CreateLobby(code, addr, tx) => {
+                        lobby_create(addr.to_string().as_str(), code.to_string().as_str());
                         // Insert new session
                         self.session.insert(
                             code,
@@ -44,6 +44,7 @@ impl RelayManager {
                     }
                     MessageType::JoinLobby(code, addr, channel) => {
                         if let Some(session) = self.session.get_mut(&code) {
+                            lobby_joined(addr.to_string().as_str(), code.to_string().as_str());
                             // Updated session with new client addr & sending host addr back
                             session.client_addr = Some(vec![addr]);
                             let _ = channel.send(session.host_addr);
@@ -84,4 +85,18 @@ impl RelayManager {
             }
         });
     }
+}
+
+fn lobby_create(ip: &str, code: &str) {
+    let span = trace_span!("LOBBY.CREATE",);
+    let _entered = span.enter();
+
+    event!(Level::TRACE, CODE = code, HOST_IP = ip, "Lobby Created",);
+}
+
+fn lobby_joined(ip: &str, code: &str) {
+    let span = trace_span!("LOBBY.CREATE",);
+    let _entered = span.enter();
+
+    event!(Level::TRACE, IP = ip, CODE = code, "Lobby Joined!");
 }
