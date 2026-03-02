@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::net::UdpSocket;
 use tokio::{sync::oneshot, time};
-use tracing::{Event, Level, event, info_span, trace_span};
+use tracing::{Level, event, trace_span};
 
 type Code = uuid::Uuid;
 type HostAddr = SocketAddr;
@@ -78,7 +78,7 @@ impl RelayManager {
                         }
                     }
                     _ = &mut shutdown_rx => {
-                        println!("Keep-alive task shutting down for {}", addr);
+                        eprintln!("Keep-alive task shutting down for {}", addr);
                         break;
                     }
                 }
@@ -91,12 +91,12 @@ fn lobby_create(ip: &str, code: &str) {
     let span = trace_span!("LOBBY.CREATE",);
     let _entered = span.enter();
 
-    event!(Level::TRACE, CODE = code, HOST_IP = ip, "Lobby Created",);
+    event!(Level::INFO, CODE = code, HOST_IP = ip, "Lobby Created",);
 }
 
 fn lobby_joined(ip: &str, code: &str) {
-    let span = trace_span!("LOBBY.CREATE",);
+    let span = trace_span!("LOBBY.JOINED",);
     let _entered = span.enter();
 
-    event!(Level::TRACE, IP = ip, CODE = code, "Lobby Joined!");
+    event!(Level::INFO, IP = ip, CODE = code, "Lobby Joined!");
 }

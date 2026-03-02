@@ -105,7 +105,7 @@ pub async fn udp_handler(socket: Arc<UdpSocket>, channel: Arc<Sender<MessageType
             } else {
                 // Echo - Drop
                 event!(
-                    Level::INFO,
+                    Level::TRACE,
                     "Echo Packet received from addr: {}",
                     relay_observed_addr
                 );

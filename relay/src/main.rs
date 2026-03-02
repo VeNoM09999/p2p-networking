@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::{self as Runtime};
 use tracing::{Level, event};
-use tracing_subscriber::{EnvFilter, Layer};
+use tracing_subscriber::EnvFilter;
 
 mod udp;
 use udp::parser::udp_handler;
@@ -37,13 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     event!(Level::INFO, "RendezvousXSTUN server started...");
     tokio::spawn(async move {
+        event!(Level::INFO, "Global State Manager started and listening...");
         let mut state = Appstate {
             relay_manager: RelayManager {
                 session: HashMap::new(),
             },
         };
         state.relay_manager.handler(rx).await;
-        event!(Level::INFO, "Global State Manager started and listening...");
     });
     let app_handle = Arc::new(tx);
 
