@@ -1,17 +1,13 @@
-[package]
-name = "p2p-rust"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-
-[[bin]]
-name = "client"
-path = "peer/main.rs"
-
-[[bin]]
-name = "server"
-path = "relay/main.rs"
 [workspace]
-# members = ["common", "peer", "rendezvous", "relay"]
-members = ["peer", "relay"]
+members = ["peer", "rendezvous_stun_server", "turn_server", "common"]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+clap = "4.5.60"
+serde = "1.0.228"
+serde_json = "1.0.149"
+tokio = "1.50.0"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+uuid = "1.22.0"
