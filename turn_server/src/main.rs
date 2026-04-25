@@ -1,10 +1,10 @@
 use heapless::spsc::Queue;
-use turn_server::network::Session;
-use turn_server::network::io_uring_loop;
 use std::os::fd::AsRawFd;
 use tracing::Level;
 use tracing::event;
 use turn_server::network::BufferPool;
+use turn_server::network::Session;
+use turn_server::network::io_uring_loop;
 use turn_server::network::{
     BUFFER_SIZE, NUM_SHARDS, POOL_SIZE, Packet, Shard, ShardRouter, SqeType,
 };
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut shard_router = ShardRouter::new(shard_prods);
 
-    let mut buffer_pool = BufferPool::new();
+    let mut buffer_pool = BufferPool::default();
     let mut io_uring = io_uring::IoUring::builder()
         .setup_sqpoll(2)
         .setup_sqpoll_cpu(2)

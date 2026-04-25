@@ -1,17 +1,19 @@
 // #![allow(dead_code, unused)]
 
 pub mod network {
+    use core::time;
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::os::raw::c_void;
     use std::os::unix::io::RawFd;
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
-    use heapless::spsc::{Consumer, Producer, Queue};
+    use heapless::spsc::{Consumer, Producer};
     use io_uring::{opcode, types};
     use tracing::event;
-    #[cfg(target_os = "linux")]
+
+    // #[cfg(target_os = "linux")]
     use tracing::{Level, instrument};
 
     //                           LEN   IDX
@@ -30,6 +32,7 @@ pub mod network {
     // `src` tells us who sent it, `data` is the raw UDP payload.
     // ============================================================
 
+    #[derive(Clone, Copy)]
     pub struct Packet {
         pub buf_idx: u16,
         pub len: usize,
@@ -81,7 +84,7 @@ pub mod network {
     }
 
     impl BufferPool {
-        pub fn new() -> Self {
+        pub fn default() -> Self {
             Self {
                 memory: vec![0u8; POOL_SIZE * BUFFER_SIZE],
                 in_flight: 0,
@@ -257,9 +260,28 @@ pub mod network {
             loop {
                 if let Some(packet) = self.recv.dequeue() {
                     self.handle_packet(packet);
+                } else {
+                    std::thread::yield_now();
                 }
             }
             // event!(Level::INFO, "[shard {}] channel closed, exiting", self.id);
+        }
+
+        pub fn run_n(&mut self, n: usize) {
+            let mut finished = 0;
+            let timeout = Duration::from_secs(5);
+            let start = Instant::now();
+            while finished < n {
+                if start.elapsed() > timeout {
+                    break;
+                }
+                if let Some(packet) = self.recv.dequeue() {
+                    self.handle_packet(packet);
+                    finished += 1;
+                } else {
+                    std::thread::yield_now();
+                }
+            }
         }
 
         #[instrument(skip(self ,packet), fields(shard_id = self.id))]
@@ -305,7 +327,6 @@ pub mod network {
                 event!(Level::ERROR, "shard {} channel closed", shard_idx);
             }
         }
-
 
         fn shard_for(&self, _addr: &SocketAddr) -> usize {
             use std::hash::{Hash, Hasher};
