@@ -654,11 +654,13 @@ pub mod network {
     #[cfg(target_os = "linux")]
     pub fn io_uring_loop<'a>(
         ring: &mut io_uring::IoUring,
-        mut sqe_rx: Vec<Consumer<'a, SqeType>>,
+        mut sqe_rx: mpsc::Receiver<SqeType>,
         pool: &mut BufferPool,
         router: &mut ShardRouter,
         listen_fd: RawFd,
+        mut controller_rx: mpsc::Receiver<MessageType>,
     ) {
+        event!(Level::DEBUG, "IoUring Event Loop Starting...");
         // TODO: Buffer registeration with kernel
 
         // Split the ring into independently borrowable halves.
@@ -677,51 +679,60 @@ pub mod network {
             }
         }
         event!(Level::DEBUG, "[uring] pushed {} recv SQEs", seeded);
-
+        // event!(Level::INFO, "sq len after seeding = {}", sq.len());
         sq.sync();
         submitter.submit().unwrap();
 
+        event!(Level::INFO, "IoUring Event Loop Started!");
         // ── main event loop ────────────────────────────────────────
         loop {
-            let mut pushed = 0;
-            for queue in &mut sqe_rx {
-                while let Some((addr, len, idx)) = queue.dequeue() {
-                    let _entry = pool.post_send_sqe(&mut sq, listen_fd, len, idx, addr);
-                    pool.mark_send_sqe_at(&idx, Instant::now());
-                    event!(Level::DEBUG, "processing send sqe");
-                    pushed += 1;
+            while let Ok(msg) = controller_rx.try_recv() {
+                match msg {
+                    MessageType::AddSession(session) => {
+                        event!(Level::INFO, "gRPC add_session request");
+                        let shard = router.next_shard();
+                        &mut router.senders[shard].enqueue(MessageType::AddSession(session));
+                        router.endpoint_to_shard.insert(session.host_addr, shard);
+
+                        router.endpoint_to_shard.insert(session.peer_addr, shard);
+                    }
+                    MessageType::Transmit(_) => {}
                 }
+            }
+            let mut pushed = 0;
+            while let Ok((addr, len, idx)) = sqe_rx.try_recv() {
+                pool.mark_shard_done_at(&idx, Instant::now());
+                let _entry = pool.post_send_sqe(&mut sq, listen_fd, len, idx, addr);
+                pool.mark_send_sqe_at(&idx, Instant::now());
+                event!(Level::DEBUG, "processing send sqe");
+                pushed += 1;
             }
             if pushed > 0 {
                 sq.sync();
-                submitter.submit().unwrap();
+                // submitter.submit().unwrap();
             }
             // Wait for at least one CQE (blocks if ring is idle).
             // Use submit_and_wait(1) so we don't busy-spin; in SQPOLL
             // mode replace with submit() and a lightweight sleep/yield.
             // submitter.submit_and_wait(1);
             cq.sync(); // update the kernel-visible head pointer
+            event!(Level::DEBUG, "CQE Len Before Processing {}", cq.len());
+            //
             if cq.is_empty() {
-                cq.sync();
+                std::hint::spin_loop();
+                continue;
+                // submitter.submit_and_wait(1).unwrap();
+                // std::thread::sleep(Duration::from_micros(50));
+                // cq.sync();
             }
 
             //
             //     Phase 3 Processing CQE
             //
-            let completed: Vec<(OpType, u16, usize, u32)> = {
-                (&mut cq)
-                    .map(|cqe| {
-                        let (op, idx) = decode_token(cqe.user_data());
-                        let sys_call = cqe.result().max(0) as usize;
-                        let flags = cqe.flags();
-                        (op, idx, sys_call, flags)
-                    })
-                    .collect()
-                // cq released
-            };
-            event!(Level::DEBUG, "[uring] processed {} CQEs", completed.len());
-
-            for (op, buf_idx, len, flags) in completed {
+            while let Some(cqe) = cq.next() {
+                let (op, buf_idx) = decode_token(cqe.user_data());
+                let len = cqe.result().max(0) as usize;
+                let flags = cqe.flags();
                 match op {
                     OpType::Recv => {
                         pool.mark_recv_for(buf_idx, Instant::now());
@@ -730,11 +741,10 @@ pub mod network {
 
                         // Route packet to the respective shard.
                         // .await is safe here — cq borrow is fully released.
+                        pool.mark_recv_for(buf_idx, Instant::now());
 
                         router.route(Packet { buf_idx, src, len });
-                        pool.mark_shard_done_at(&buf_idx, Instant::now());
                     }
-
                     OpType::Send => {
                         // Kernel finished sending — buffer is safe to reuse. # Reregistering buffer
                         if !io_uring::cqueue::more(flags) {
@@ -764,16 +774,147 @@ pub mod network {
                     }
                 }
             }
-
-            // Phase 4 Send SQE for kernel to process
-            // Listen for new sqe entry generated by shards and push them in sqe and later flush
-            // let deadline = std::time::Instant::now() + std::time::Duration::from_micros(150);
-            // loop {
-            //     if std::time::Instant::now() > deadline {
-            //         break;
-            //     }
-            //     std::thread::yield_now();
-            // }
         }
     }
+    // #[cfg(target_os = "linux")]
+    // pub fn io_uring_loop<'a>(
+    //     ring: &mut io_uring::IoUring,
+    //     mut sqe_rx: Vec<Consumer<'a, SqeType>>,
+    //     pool: &mut BufferPool,
+    //     router: &mut ShardRouter,
+    //     listen_fd: RawFd,
+    //     mut controller_rx: mpsc::Receiver<MessageType>,
+    // ) {
+    //     event!(Level::DEBUG, "IoUring Event Loop Starting...");
+    //     // TODO: Buffer registeration with kernel
+    //
+    //     // Split the ring into independently borrowable halves.
+    //     // `sq`  → SubmissionQueue  (push SQEs)
+    //     // `cq`  → CompletionQueue  (drain CQEs)
+    //     // `sub` → Submitter        (syscall / SQPOLL flush)
+    //     let (submitter, mut sq, mut cq) = ring.split();
+    //
+    //     pool.register_buffer_kernel(&submitter); // Phase 1 : Registeration Entry sent to ring. Waiting
+    //     // for submit
+    //     let mut seeded = 0;
+    //     for _ in 0..POOL_SIZE {
+    //         if let Some(idx) = pool.acquire() {
+    //             pool.post_recv_sqe(&mut sq, listen_fd, idx, None);
+    //             seeded += 1;
+    //         }
+    //     }
+    //     event!(Level::DEBUG, "[uring] pushed {} recv SQEs", seeded);
+    //     // event!(Level::INFO, "sq len after seeding = {}", sq.len());
+    //     sq.sync();
+    //     submitter.submit().unwrap();
+    //
+    //     event!(Level::INFO, "IoUring Event Loop Started!");
+    //     // ── main event loop ────────────────────────────────────────
+    //     loop {
+    //         let mut pushed = 0;
+    //         for queue in &mut sqe_rx {
+    //             while let Some((addr, len, idx)) = queue.dequeue() {
+    //                 let _entry = pool.post_send_sqe(&mut sq, listen_fd, len, idx, addr);
+    //                 pool.mark_send_sqe_at(&idx, Instant::now());
+    //                 event!(Level::DEBUG, "processing send sqe");
+    //                 pushed += 1;
+    //             }
+    //         }
+    //         if pushed > 0 {
+    //             sq.sync();
+    //             submitter.submit().unwrap();
+    //         }
+    //         // Wait for at least one CQE (blocks if ring is idle).
+    //         // Use submit_and_wait(1) so we don't busy-spin; in SQPOLL
+    //         // mode replace with submit() and a lightweight sleep/yield.
+    //         // submitter.submit_and_wait(1);
+    //         cq.sync(); // update the kernel-visible head pointer
+    //         if cq.is_empty() {
+    //             cq.sync();
+    //         }
+    //
+    //         //
+    //         //     Phase 3 Processing CQE
+    //         //
+    //         let completed: Vec<(OpType, u16, usize, u32)> = {
+    //             (&mut cq)
+    //                 .map(|cqe| {
+    //                     let (op, idx) = decode_token(cqe.user_data());
+    //                     let sys_call = cqe.result().max(0) as usize;
+    //                     let flags = cqe.flags();
+    //                     (op, idx, sys_call, flags)
+    //                 })
+    //                 .collect()
+    //             // cq released
+    //         };
+    //         event!(Level::DEBUG, "[uring] processed {} CQEs", completed.len());
+    //
+    //         for (op, buf_idx, len, flags) in completed {
+    //             match op {
+    //                 OpType::Recv => {
+    //                     pool.mark_recv_for(buf_idx, Instant::now());
+    //                     // Extract peer address from the msghdr the kernel filled.
+    //                     let src = pool.get_peer_addr(buf_idx);
+    //
+    //                     // Route packet to the respective shard.
+    //                     // .await is safe here — cq borrow is fully released.
+    //
+    //                     router.route(Packet { buf_idx, src, len });
+    //                     pool.mark_shard_done_at(&buf_idx, Instant::now());
+    //                 }
+    //
+    //                 OpType::Send => {
+    //                     // Kernel finished sending — buffer is safe to reuse. # Reregistering buffer
+    //                     if !io_uring::cqueue::more(flags) {
+    //                         pool.release(buf_idx, listen_fd, &mut sq);
+    //                         if let Some(t) = pool.take_recv_for(&buf_idx) {
+    //                             // event!(Level::INFO, "processing time : {:#?}", instant.elapsed());
+    //                             let send_cqe_at = Instant::now();
+    //                             let shard_done_at =
+    //                                 t.shard_done_at.unwrap().duration_since(t.recv_cqe_at);
+    //                             let handoff = t
+    //                                 .send_sqe_at
+    //                                 .unwrap()
+    //                                 .duration_since(t.shard_done_at.unwrap());
+    //                             let kernel = send_cqe_at.duration_since(t.send_sqe_at.unwrap());
+    //                             let total = send_cqe_at.duration_since(t.recv_cqe_at);
+    //                             event!(Level::INFO, total = ?total, shard = ?shard_done_at, handoff = ?handoff, kernel = ?kernel);
+    //                         };
+    //                         event!(
+    //                             Level::DEBUG,
+    //                             "BufferPool with {} reregister for new RECV",
+    //                             buf_idx
+    //                         );
+    //                     }
+    //                 }
+    //                 OpType::SendNotif => {
+    //                     pool.release(buf_idx, listen_fd, &mut sq);
+    //                 }
+    //             }
+    //         }
+    //         while let Ok(msg) = controller_rx.try_recv() {
+    //             match msg {
+    //                 MessageType::AddSession(session) => {
+    //                     event!(Level::INFO, "gRPC add_session request");
+    //                     let shard = router.next_shard();
+    //                     &mut router.senders[shard].enqueue(MessageType::AddSession(session));
+    //                     router.endpoint_to_shard.insert(session.host_addr, shard);
+    //
+    //                     router.endpoint_to_shard.insert(session.peer_addr, shard);
+    //                 }
+    //                 MessageType::Transmit(_) => {}
+    //             }
+    //         }
+    //
+    //         // Phase 4 Send SQE for kernel to process
+    //         // Listen for new sqe entry generated by shards and push them in sqe and later flush
+    //         // let deadline = std::time::Instant::now() + std::time::Duration::from_micros(150);
+    //         // loop {
+    //         //     if std::time::Instant::now() > deadline {
+    //         //         break;
+    //         //     }
+    //         //     std::thread::yield_now();
+    //         // }
+    //     }
+    // }
 }
