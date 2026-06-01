@@ -1,0 +1,25 @@
+[package]
+name = "turn_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ahash = "0.8.12"
+common = { version = "0.1.0", path = "../common", features = ["relay"] }
+core_affinity = "0.8.3"
+heapless = "0.9.2"
+io-uring = "0.7.11"
+libc = "0.2.183"
+tokio = { workspace = true, features = ["full"] }
+tonic = "0.14.6"
+tracing.workspace = true
+tracing-appender = "0.2.4"
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "bench"
+harness = false
