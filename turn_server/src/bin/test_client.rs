@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 const MAX_PAYLOAD: usize = 1000;
 const SEND_INTERVAL: Duration = Duration::from_micros(1); // ~10,000 pps per side
 const SAMPLE_DURATION: Duration = Duration::from_secs(1); // update every 1 second
+const TURN_SERVER_ADDR: &str = "192.168.1.40:8080";
 
 fn main() {
-    let host = Arc::new(UdpSocket::bind("127.0.0.1:9001").unwrap());
-    let peer = Arc::new(UdpSocket::bind("127.0.0.1:9002").unwrap());
+    let host = Arc::new(UdpSocket::bind("192.168.1.42:9001").unwrap());
+    let peer = Arc::new(UdpSocket::bind("192.168.1.42:9002").unwrap());
 
     host.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -36,7 +37,7 @@ fn main() {
             let payload = &mut payload_buf[..len];
             payload.fill((i % 256) as u8);
 
-            if let Err(e) = peer.send_to(payload, "127.0.0.1:8080") {
+            if let Err(e) = peer.send_to(payload, TURN_SERVER_ADDR) {
                 eprintln!("peer send error: {}", e);
             }
 
@@ -68,7 +69,7 @@ fn main() {
                     let payload = &mut payload_buf[..len];
                     payload.fill((i % 256) as u8);
 
-                    if let Err(e) = host.send_to(payload, "127.0.0.1:8080") {
+                    if let Err(e) = host.send_to(payload, TURN_SERVER_ADDR) {
                         eprintln!("host send error: {}", e);
                     }
 
