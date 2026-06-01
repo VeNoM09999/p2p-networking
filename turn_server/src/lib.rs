@@ -1,28 +1,29 @@
 // #![allow(dead_code, unused)]
 
 pub mod network {
-    use core::time;
     use std::collections::HashMap;
-    use std::net::SocketAddr;
+    use std::net::{AddrParseError, SocketAddr};
     use std::os::raw::c_void;
     use std::os::unix::io::RawFd;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use common::relay::relay_control_server::RelayControl;
+    use common::relay::{CreateSessionRequest, CreateSessionResponse};
     use heapless::spsc::{Consumer, Producer};
     use io_uring::{opcode, types};
+    use tokio::sync::{self, mpsc};
+    use tonic::{Response, Status};
     use tracing::event;
 
-    // #[cfg(target_os = "linux")]
     use tracing::{Level, instrument};
 
-    //                           LEN   IDX
+    //                               LEN   IDX
     pub type SqeType = (SocketAddr, usize, u16);
+    //
     // ============================================================
     // CONSTANTS
     // ============================================================
 
-    pub const NUM_SHARDS: usize = 1; // one per CPU core ideally
     pub const BUFFER_SIZE: usize = 1500; // MTU size per buffer
     pub const POOL_SIZE: usize = 1024; // buffers per shard pool
 
@@ -32,11 +33,17 @@ pub mod network {
     // `src` tells us who sent it, `data` is the raw UDP payload.
     // ============================================================
 
-    #[derive(Clone, Copy)]
+    #[derive(Debug, Clone, Copy)]
     pub struct Packet {
         pub buf_idx: u16,
         pub len: usize,
         pub src: SocketAddr,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub enum MessageType {
+        AddSession(Session),
+        Transmit(Packet),
     }
 
     // ============================================================
@@ -44,6 +51,7 @@ pub mod network {
     // One session = one (host, peer) pair being relayed.
     // ============================================================
 
+    #[derive(Debug, Clone, Copy)]
     pub struct Session {
         pub host_addr: SocketAddr,
         pub peer_addr: SocketAddr,
@@ -74,8 +82,8 @@ pub mod network {
     }
 
     pub struct BufferPool {
-        memory: Vec<u8>,
-        in_flight: usize,
+        memory: Box<[u8]>,
+        _in_flight: usize,
         registered: bool,
         free_list: Vec<u16>,
         timestamp: HashMap<u16, PacketTiming>,
@@ -86,8 +94,8 @@ pub mod network {
     impl BufferPool {
         pub fn default() -> Self {
             Self {
-                memory: vec![0u8; POOL_SIZE * BUFFER_SIZE],
-                in_flight: 0,
+                memory: vec![0u8; POOL_SIZE * BUFFER_SIZE].into_boxed_slice(),
+                _in_flight: 0,
                 registered: false,
                 live_slots: HashMap::new(),
                 free_list: Vec::new(),
@@ -120,6 +128,7 @@ pub mod network {
 
             event!(Level::INFO, "bufferpool registered");
         }
+
         fn post_recv_sqe(
             &mut self,
             sqe: &mut io_uring::SubmissionQueue,
