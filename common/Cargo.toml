@@ -1,0 +1,25 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+
+
+[features]
+default = []
+singleconnection = []
+multiconnection = []
+relay = []
+
+
+[dependencies]
+anyhow.workspace = true
+dashmap = "6.1.0"
+tokio = { workspace = true, features = ["full"] }
+tonic = "0.14.6"
+prost = "0.14.3"
+tonic-prost = "0.14.6"
+
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
