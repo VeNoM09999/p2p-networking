@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package relay;
+
+service RelayControl {
+    rpc CreateSession(CreateSessionRequest)
+        returns (CreateSessionResponse);
+}
+
+message CreateSessionRequest {
+    string host_addr = 2;
+    string peer_addr = 3;
+}
+
+message CreateSessionResponse {
+    bool success = 1;
+}
