@@ -1,0 +1,10 @@
+[package]
+name = "controller"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common = { version = "0.1.0", path = "../common", features = ["relay"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+

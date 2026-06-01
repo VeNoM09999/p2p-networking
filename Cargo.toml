@@ -1,5 +1,5 @@
 [workspace]
-members = ["peer", "rendezvous_stun_server", "turn_server", "common"]
+members = ["peer", "rendezvous_stun_server", "turn_server", "common", "controller"]
 resolver = "3"
 
 [workspace.dependencies]
