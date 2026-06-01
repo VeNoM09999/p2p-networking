@@ -234,46 +234,74 @@ pub mod network {
     // and buffer pool — no Mutex/RwLock needed anywhere.
     // ============================================================
 
+    type SessionId = uuid::Uuid;
     pub struct Shard<'a> {
         pub id: usize,
-        recv: Consumer<'a, Packet>,
-        session_table: HashMap<SocketAddr, Arc<Session>>,
-        tx_out: Producer<'a, SqeType>,
+        recv: Consumer<'a, MessageType>,
+        session_table: HashMap<SessionId, Session>,
+        session_id: HashMap<SocketAddr, SessionId>,
+        tx_out: mpsc::Sender<SqeType>,
     }
 
     impl<'a> Shard<'a> {
-        pub fn new(id: usize, recv: Consumer<'a, Packet>, tx_out: Producer<'a, SqeType>) -> Self {
+        pub fn new(
+            id: usize,
+            recv: Consumer<'static, MessageType>,
+            tx_out: mpsc::Sender<SqeType>,
+        ) -> Self {
             Self {
                 id,
                 recv,
                 session_table: HashMap::new(),
                 tx_out,
+                session_id: HashMap::new(),
             }
         }
 
         pub fn add_session(&mut self, session: Session) {
-            let arc = Arc::new(session);
-            self.session_table.insert(arc.host_addr, Arc::clone(&arc));
-            self.session_table.insert(arc.peer_addr, Arc::clone(&arc));
+            let session_id = uuid::Uuid::new_v4();
+            self.session_id.insert(session.host_addr, session_id);
+            self.session_id.insert(session.peer_addr, session_id);
+            self.session_table.insert(session_id, session);
             event!(
                 Level::INFO,
                 "[shard {}] registered session {} ↔ {}",
                 self.id,
-                arc.host_addr,
-                arc.peer_addr
+                session.host_addr,
+                session.peer_addr
             );
         }
 
         pub fn run(&mut self) {
             event!(Level::INFO, "[shard {}] started", self.id);
+            let mut idle_loops = 0;
             loop {
-                if let Some(packet) = self.recv.dequeue() {
-                    self.handle_packet(packet);
-                } else {
-                    std::thread::yield_now();
+                let queuelength = self.recv.len();
+                if queuelength >= 1000 {
+                    event!(Level::INFO, "Shard queuelength exceeded 1000");
                 }
+                if let Some(msg) = self.recv.dequeue() {
+                    idle_loops = 0;
+                    match msg {
+                        MessageType::AddSession(session) => {
+                            let session_id = uuid::Uuid::new_v4();
+                            self.session_id.insert(session.host_addr, session_id);
+                            self.session_id.insert(session.peer_addr, session_id);
+                            self.session_table.insert(session_id, session);
+                        }
+                        MessageType::Transmit(packet) => {
+                            self.handle_packet(packet);
+                        }
+                    }
+                } else {
+                    idle_loops += 1;
+                    if idle_loops < 10_000 {
+                        std::hint::spin_loop();
+                    } else {
+                        std::thread::sleep(Duration::from_micros(50));
+                    }
+                } // event!(Level::INFO, "[shard {}] channel closed, exiting", self.id);
             }
-            // event!(Level::INFO, "[shard {}] channel closed, exiting", self.id);
         }
 
         pub fn run_n(&mut self, n: usize) {
@@ -284,11 +312,21 @@ pub mod network {
                 if start.elapsed() > timeout {
                     break;
                 }
-                if let Some(packet) = self.recv.dequeue() {
-                    self.handle_packet(packet);
-                    finished += 1;
-                } else {
-                    std::thread::yield_now();
+                match self.recv.dequeue() {
+                    Some(MessageType::AddSession(session)) => {
+                        let session_id = uuid::Uuid::new_v4();
+                        self.session_id.insert(session.host_addr, session_id);
+                        self.session_id.insert(session.peer_addr, session_id);
+                        self.session_table.insert(session_id, session);
+                    }
+
+                    Some(MessageType::Transmit(packet)) => {
+                        self.handle_packet(packet);
+                        finished += 1;
+                    }
+                    None => {
+                        std::thread::yield_now();
+                    }
                 }
             }
         }
@@ -320,29 +358,48 @@ pub mod network {
     // client always lands on the same shard with zero locks.
     // ============================================================
 
-    pub struct ShardRouter<'a> {
-        senders: Vec<Producer<'a, Packet>>,
+    pub struct ShardRouter {
+        senders: Vec<Producer<'static, MessageType>>,
+        endpoint_to_shard: HashMap<SocketAddr, usize>,
+        next_shard: usize,
     }
 
-    impl<'a> ShardRouter<'a> {
-        pub fn new(senders: Vec<Producer<'a, Packet>>) -> Self {
-            Self { senders }
-        }
-
-        fn route(&mut self, packet: Packet) {
-            let shard_idx = self.shard_for(&packet.src);
-            let channel = &mut self.senders[shard_idx];
-            if channel.enqueue(packet).is_err() {
-                event!(Level::ERROR, "shard {} channel closed", shard_idx);
+    impl ShardRouter {
+        pub fn new(senders: Vec<Producer<'static, MessageType>>) -> Self {
+            Self {
+                senders,
+                endpoint_to_shard: HashMap::new(),
+                next_shard: 0,
             }
         }
 
-        fn shard_for(&self, _addr: &SocketAddr) -> usize {
+        fn route(&mut self, packet: Packet) {
+            if let Some(idx) = self.endpoint_to_shard.get(&packet.src) {
+                let channel = &mut self.senders[*idx];
+                if channel.enqueue(MessageType::Transmit(packet)).is_err() {
+                    event!(Level::ERROR, "shard {} channel closed", idx);
+                }
+            }
+        }
+        fn next_shard(&mut self) -> usize {
+            let shard = self.next_shard;
+            self.next_shard = (self.next_shard + 1) % self.senders.len();
+            shard
+        }
+
+        fn shard_for(&self, host: SocketAddr, peer: SocketAddr) -> usize {
             use std::hash::{Hash, Hasher};
             // ahash is a fast non-crypto hasher — much better distribution than
             // the manual ip^port XOR which clusters on low port numbers.
             let mut hasher = ahash::AHasher::default();
-            _addr.hash(&mut hasher);
+
+            if host <= peer {
+                host.hash(&mut hasher);
+                peer.hash(&mut hasher);
+            } else {
+                peer.hash(&mut hasher);
+                host.hash(&mut hasher);
+            }
             (hasher.finish() as usize) % self.senders.len()
         }
     }
