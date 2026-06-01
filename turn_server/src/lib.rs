@@ -334,23 +334,54 @@ pub mod network {
         #[instrument(skip(self ,packet), fields(shard_id = self.id))]
         fn handle_packet(&mut self, packet: Packet) {
             event!(Level::DEBUG,src = %packet.src,len = packet.len,  "got packet");
-            if let Some(session) = self.session_table.get(&packet.src) {
-                if let Some(dst) = session.route_to(&packet.src) {
-                    match self.tx_out.enqueue((dst, packet.len, packet.buf_idx)) {
-                        Ok(_) => {
-                            event!(Level::DEBUG, "shard -> io_uring loop message sent");
+            if let Some(session_id) = self.session_id.get(&packet.src) {
+                if let Some(session) = self.session_table.get(session_id) {
+                    if let Some(dst) = session.route_to(&packet.src) {
+                        match self.tx_out.try_send((dst, packet.len, packet.buf_idx)) {
+                            Ok(_) => {
+                                event!(Level::DEBUG, "shard -> io_uring loop message sent");
+                            }
+                            Err(_e) => {
+                                event!(Level::DEBUG, "Error sending channel");
+                            }
                         }
-                        Err(_e) => {
-                            event!(Level::DEBUG, "Error sending channel");
-                        }
+                    } else {
+                        event!(Level::ERROR, "route_to returned None for {}", packet.src);
                     }
-                } else {
-                    event!(Level::ERROR, "route_to returned None for {}", packet.src);
-                }
-            };
+                };
+            }
         }
     }
 
+    #[derive(Clone)]
+    pub struct RelayControlService {
+        pub control_tx: sync::mpsc::Sender<MessageType>,
+    }
+
+    #[tonic::async_trait]
+    impl RelayControl for RelayControlService {
+        async fn create_session(
+            &self,
+            request: tonic::Request<CreateSessionRequest>,
+        ) -> std::result::Result<tonic::Response<CreateSessionResponse>, tonic::Status> {
+            let request = request.into_inner();
+
+            let session = Session {
+                host_addr: request
+                    .host_addr
+                    .parse()
+                    .map_err(|e: AddrParseError| Status::invalid_argument(e.to_string()))?,
+                peer_addr: request
+                    .peer_addr
+                    .parse()
+                    .map_err(|e: AddrParseError| Status::invalid_argument(e.to_string()))?,
+            };
+
+            let _ = self.control_tx.send(MessageType::AddSession(session)).await;
+
+            Ok(Response::new(CreateSessionResponse { success: true }))
+        }
+    }
     // ============================================================
     // SHARD ROUTER
     // Routes every packet to the correct shard via a stable hash
